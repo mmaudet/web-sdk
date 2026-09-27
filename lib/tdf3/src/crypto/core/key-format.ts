@@ -1,6 +1,7 @@
 import {
   ecAlgorithmToCurve,
   isEcKeyAlgorithm,
+  isHybridKeyAlgorithm,
   isMlKemKeyAlgorithm,
   isRsaKeyAlgorithm,
   type KeyAlgorithm,
@@ -22,7 +23,9 @@ import {
   toJwsAlg,
 } from '../../../../src/crypto/pemPublicToCrypto.js';
 import {
+  unwrapHybridKey,
   unwrapKey,
+  wrapHybridPublicKey,
   wrapMlKemPublicKey,
   unwrapMlKemKey,
   wrapPrivateKey,
@@ -30,6 +33,7 @@ import {
 } from './keys.js';
 import { bytesEqual, readTlv } from './asn1.js';
 import { decodeMlKemSpkiDer, encodeMlKemSpkiDer, ML_KEM_OID_ARC_PREFIX } from './mlkem-asn1.js';
+import { decodeHybridSpkiDer, encodeHybridSpkiDer, hybridAlgorithmForOid } from './hybrid-asn1.js';
 import { rsaOaepSha1 } from './rsa.js';
 
 /**
@@ -177,6 +181,13 @@ export async function parsePublicKeyPem(pem: string): Promise<PublicKeyInfo> {
     return { algorithm: `mlkem:${level}` as const, pem: publicKeyPem };
   }
 
+  // Hybrid ML-KEM + ECDH composite KEMs: route by their composite OID, then
+  // let decodeHybridSpkiDer validate structure and length.
+  if (hybridAlgorithmForOid(algorithmOid)) {
+    const { algorithm } = decodeHybridSpkiDer(der);
+    return { algorithm, pem: publicKeyPem };
+  }
+
   if (bytesEqual(algorithmOid, RSA_OID)) {
     // Use JWK export to read the modulus size.
     const modulusBits = await extractRsaModulusBitLength(der.buffer);
@@ -297,6 +308,19 @@ export async function importPublicKey(pem: string, options: KeyOptions): Promise
       );
     }
     return wrapMlKemPublicKey(rawKey, level);
+  }
+
+  // Hybrid keys: WebCrypto knows neither ML-KEM nor composite SPKIs, so the key
+  // stays an opaque `PublicKey` carrying the raw ML-KEM key and EC point.
+  if (isHybridKeyAlgorithm(keyInfo.algorithm)) {
+    const der = new Uint8Array(base64Decode(removePemFormatting(keyInfo.pem)));
+    const { algorithm, rawKey } = decodeHybridSpkiDer(der);
+    if (algorithmHint && algorithmHint !== algorithm) {
+      throw new ConfigurationError(
+        `Hybrid SPKI advertises ${algorithm} but algorithmHint is ${algorithmHint}`
+      );
+    }
+    return wrapHybridPublicKey(rawKey, algorithm);
   }
 
   const algorithm = algorithmHint || keyInfo.algorithm;
@@ -451,6 +475,10 @@ export async function importPrivateKey(pem: string, options: KeyOptions): Promis
  * so the resulting PEM is byte-compatible with `openssl pkey -pubout`.
  */
 export async function exportPublicKeyPem(key: PublicKey): Promise<string> {
+  if (isHybridKeyAlgorithm(key.algorithm)) {
+    const der = encodeHybridSpkiDer(unwrapHybridKey(key), key.algorithm);
+    return formatAsPem(der.buffer.slice(der.byteOffset, der.byteOffset + der.byteLength), 'PUBLIC KEY');
+  }
   if (isMlKemKeyAlgorithm(key.algorithm)) {
     const level = mlKemAlgorithmToLevel(key.algorithm);
     const der = encodeMlKemSpkiDer(unwrapMlKemKey(key), level);

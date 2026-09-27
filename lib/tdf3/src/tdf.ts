@@ -40,6 +40,7 @@ import { DecoratedReadableStream } from './client/DecoratedReadableStream.js';
 import {
   type CryptoService,
   type DecryptResult,
+  isHybridKeyAlgorithm,
   isMlKemKeyAlgorithm,
   type KeyPair,
   mlKemAlgorithmToLevel,
@@ -51,6 +52,7 @@ import {
   KeyAccessType,
   KeyInfo,
   MLKEM_CT_SIZES,
+  HybridWrapped,
   MlKemWrapped,
   Manifest,
   Policy,
@@ -380,6 +382,18 @@ export async function buildKeyAccess({
         );
       }
       return new MlKemWrapped(url, kid, pubKey, metadata, cryptoService, sid, alg);
+    case 'hybrid-wrapped':
+      if (!isHybridKeyAlgorithm(alg)) {
+        throw new ConfigurationError(
+          `buildKeyAccess: algorithm [${alg}] is not valid for hybrid-wrapped`
+        );
+      }
+      if (!kid?.trim()) {
+        throw new ConfigurationError(
+          `buildKeyAccess: kid is required for hybrid algorithm [${alg}]`
+        );
+      }
+      return new HybridWrapped(url, kid, pubKey, metadata, cryptoService, sid, alg);
     default:
       throw new ConfigurationError(`buildKeyAccess: Key access type [${type}] is unsupported`);
   }
